@@ -3,19 +3,35 @@ import asyncio
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 from pydantic import BaseModel
 from test import main
+from mcp_client import initialize_mcp_clients
 import json
-from typing import Optional
+from typing import Optional, Dict
 import  uuid
-app = FastAPI()
 import os
 
 from groq import Groq
 
+mcp_tools = []
+mcp_lookup = {}
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Load the ML model
+    global mcp_tools, mcp_lookup
+    mcp_tools, mcp_lookup = await initialize_mcp_clients()
+    print("startup complete")
+    yield
+
+app = FastAPI(lifespan=lifespan)
+
+
 client = Groq(
     api_key=os.getenv("GROQ_API_KEY"),
 )
+
+
 
 
 # Enable CORS
@@ -37,10 +53,10 @@ import asyncio
 import httpx
 
 
-async def handle_outbound_logic():
+async def handle_outbound_logic(history: str):
     # Step 1: Call
     async with httpx.AsyncClient() as client:
-        response = await client.post("https://0609-36-255-84-98.ngrok-free.app/outbound-call", json={"number": "+919343282801"})
+        response = await client.post("https://7c9f-36-255-84-98.ngrok-free.app/outbound-call", json={"number": "+919343282801","prompt":f"You are the Software engineer which is has takend some actions and now asking for the permission for the given task after either getting the permission or not end the call {history}"})
         call_sid = response.json()["callSid"]
 
     print(f"Waiting for transcript of call {call_sid}...")
@@ -69,7 +85,7 @@ async def handle_outbound_logic():
 active_connections: list[WebSocket] = []
 permission_response_event = asyncio.Event()
 permission_response_value = None
-async def broadcast_status(message: Optional[str]=None, type: Optional[str]="status", title: Optional[str]= None, progress:  Optional[str]= "todo",id: Optional[uuid]= uuid.uuid4() ) -> None:
+async def broadcast_status(message: Optional[str]=None, type: Optional[str]="status", title: Optional[str]= None, progress:  Optional[str]= "todo",id: Optional[uuid]= uuid.uuid4() ,codeChange: Optional[list[Dict]] = None) -> None:
     global permission_response_event, permission_response_value
     if type == "task":
         for connection in active_connections:
@@ -81,6 +97,13 @@ async def broadcast_status(message: Optional[str]=None, type: Optional[str]="sta
 
             }}))
         return id
+    elif type == "code_viewer":
+        for connection in active_connections:
+            await connection.send_text(json.dumps({"type": type, "message": {
+                "codeChange": codeChange,
+
+            }}))
+
     elif type == "permission":
         # Clear any previous event
         permission_response_event.clear()
@@ -155,9 +178,13 @@ async def wait():
 async def handle_query(query: Query):
     try:
         # Send initial status
-        response = await main(query.content,broadcast_status,handle_outbound_logic)
-
-
+        response = await main(
+            query.content,
+            broadcast_status,
+            handle_outbound_logic,
+            mcp_tools=mcp_tools,
+            mcp_lookup=mcp_lookup
+        )
         await broadcast_status(message="Done")
     except Exception as e:
         await broadcast_status(message=f"Error: {str(e)}")

@@ -7,9 +7,9 @@ from mcp.client.stdio import stdio_client
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from typing import  Optional
-
+from browsing_agent import run_browser_task_and_get_result,_run_agent_and_extract
 from pprint import pprint
-
+from constants import *
 # Load environment variables
 load_dotenv()
 GITHUB_TOKEN = os.getenv("GITHUB_ACCESS_TOKEN")
@@ -28,6 +28,20 @@ def get_github_file_sha(repo: str, path: str):
     if response.status_code == 200:
         return response.json().get("sha")
     return None
+
+
+
+async def surf_website(task):
+    try:
+        final_result = await _run_agent_and_extract(task)
+        if final_result is not None:
+            return final_result
+        return "No results found for the website"
+    except Exception as e:
+        return "Not able to run browser task"
+
+
+
 
 def update_tool_input_with_sha(tool_name, tool_input):
     keys = ["path", "file_path", "filepath", "filePath"]
@@ -48,20 +62,33 @@ def ask_user_permission():
         else:
             print("Invalid input. Please enter 'yes' or 'no'.")
 # --- Call a tool ---
-async def call_tool_async(session, tool_name, inputs):
+async def call_tool_async(session1, tool_name, inputs):
+    print("Actual tool call started------------------------------------------")
     print(f"\n🔧 Calling Tool: {tool_name}")
+    print("Inputs",inputs)
+    print("Session",session1)
+    print("SEssion Type,",type(session1))
     if tool_name == "get_permission":
         permit = ask_user_permission()
         return "permission Status: User response"+str(permit)
 
     inputs = update_tool_input_with_sha(tool_name, inputs)
+    print('INputs New',inputs)
     try:
-        result = await session.call_tool(tool_name, inputs)
+        print("Bismillah")
+        async with stdio_client(session1) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
 
-        result_text = result.content[0].text if result.content else ""
-        print(f"✅ Tool Result:")
-        pprint(result_text)
-        return result_text
+                result = await session.call_tool(tool_name, inputs)
+                print("Result",result)
+
+                result_text = result.content[0].text if result.content else ""
+                print("Result TExt",result_text)
+                print(f"✅ Tool Result:")
+                pprint(result_text)
+                print("Actual tool call ended------------------------------------------")
+                return result_text
     except Exception as e:
         print("found error",e)
         return  None
@@ -86,7 +113,7 @@ async def process_task(handle_outbound_logic, anthropic, session, query, availab
                 model="claude-3-5-sonnet-20241022",
                 max_tokens=1000,
                 messages=messages,
-                system="You are Iris the Full stack  software engineer 1 with high knowleage of every domain at the company photosage. and always generate the content in beautiful markdown . ALWAYS INTRODUCE YOURSLEF UNDER 20 WORDS AS 'Hi this is Alex' and greet user with their name",
+                system="You are Iris the Full stack  software engineer 1 with high knowleage of every domain at the company photosage. and always generate the content in beautiful markdown . ALWAYS INTRODUCE YOURSLEF UNDER 20 WORDS AS 'Hi this is Iris' and greet user with their name",
                 tools=available_tools,
             )
         except Exception as e:
@@ -107,7 +134,7 @@ async def process_task(handle_outbound_logic, anthropic, session, query, availab
                 assistant_content.append({"type": "text", "text": content.text})
             elif content.type == "tool_use":
                 if a==1:
-                    await broadcast_message("Connecting to Github")
+                    await broadcast_message(f"Connecting to {session[content.name][0]}")
                     await wait()
                 tool_calls.append(content)
 
@@ -127,7 +154,7 @@ async def process_task(handle_outbound_logic, anthropic, session, query, availab
             pprint(tool_call)
             tool_name = tool_call.name
             print("Tool name is", tool_name)
-            await broadcast_message(f"Using tool: {tool_name}")
+            await broadcast_message(f"Using tool: {session[tool_name][0]}: {tool_name}")
             tool_args = tool_call.input
             print("Tool args is", tool_args)
             if a==1:
@@ -135,19 +162,22 @@ async def process_task(handle_outbound_logic, anthropic, session, query, availab
                 await wait()
 
             if tool_name=="get_call_permission":
-                transcript = await handle_outbound_logic()
+                transcript = await handle_outbound_logic(messages)
                 await broadcast_message(
                     message=transcript,
                     type="status"
                 )
                 print("TRANSCRIPT", transcript)
                 result = "User permission : "+transcript
-            if tool_name=="permission":
-                result = await broadcast_message(messages=tool_args["action"], type="permission",title=tool_args["reason"])
+            elif tool_name=="get_permission":
+                result = await broadcast_message(message=tool_args["action"], type="permission",title=tool_args["reason"])
 
+            elif tool_name=="browse_website":
 
+                result = await surf_website(tool_args["task"])
+                await broadcast_message(message=result)
             else:
-                result = await call_tool_async(session, tool_name, tool_args)
+                result = await call_tool_async(session[tool_name][1], tool_name, tool_args)
             if not result:
                 print("error occured")
                 break
@@ -168,94 +198,45 @@ async def process_task(handle_outbound_logic, anthropic, session, query, availab
             a = a + 1
 
     return "\n".join(final_response)
-permission_tool = {
-            "name": "get_permission",
-            "description": "Get the user's permission reason and action required",
-            "input_schema": {
-                "type": "object",
-                "properties": {
-                    "reason": {
-                        "type": "string",
-                        "description": "Reason of asking permission, e.g. Deleting repo, Removing repo, merging PR",
-                    },
-                    "action": {
-                        "type": "string",
-                        "description": "Action as permission required for the reason, e.g. Provide true or false, Write 'I agree to terms'",
-                    }
-                },
 
-                "required": ["reason", "action"],},
-        }
-call_permission_tool = {
-            "name": "get_call_permission",
-            "description": "Get the user's permission by calling them",
-            "input_schema": {
-                "type": "object",
-            }
-        }
-# --- Entry point ---
-async def main(user_query, broadcast_message,handle_outbound_logic):
 
-    print(1)
-    docker_path = r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"
-    if not os.path.exists(docker_path):
-        raise FileNotFoundError("Docker not found.")
-    print(2)
+async def main(user_query, broadcast_message, handle_outbound_logic,mcp_tools: [],mcp_lookup: {}):
+
     anthropic = Anthropic(api_key=ANTHROPIC_API_KEY)
-    print(3)
-    server_params = None
-    try:
-        print(4)
-        server_params = StdioServerParameters(
-            command=docker_path,
-            args=[
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "ELEVENLABS_API_KEY",
-        "mcp/elevenlabs"
-      ],
-            env={"ELEVENLABS_API_KEY": ""
-      }
-        )
 
-        print(4.5)
-        print(server_params)
-    except Exception as e:
-        print("Supabase Server error",e)
+    # pprint(mcp_tools)
+    result = await process_task(
+        handle_outbound_logic,
+        anthropic,
+        mcp_lookup,  # Using first session; adjust if process_task needs multiple sessions
+        user_query,
+        mcp_tools,
+        broadcast_message
+    )
+    result = "hi"
+    print("\n🧠 Final Response:\n", result)
 
-    user_input = user_query
-    print("reached")
-    try:
-        async with stdio_client(server_params) as (read, write):
-            print("reached 1")
-            async with ClientSession(read, write) as session:
-                print(5)
-                await session.initialize()
-                print(6)
-                tool_response = await session.list_tools()
-                print(7)
-
-                available_tools = [
-                    {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "input_schema": tool.inputSchema,
-                    }
-                    for tool in tool_response.tools
-                ]
-                available_tools.append(permission_tool)
-                available_tools.append(call_permission_tool)
-                print(9)
-                print(f"\n🛠️ Tools available: {[t['name'] for t in available_tools]}")
-
-                print(10)
-                result = await process_task(handle_outbound_logic, anthropic, session, user_input, available_tools,broadcast_message)
-                print(11)
-                result = "testing"
-                print("\n🧠 Final Response:\n", result)
-                return result
-    except Exception as e:
-        print("Master error",e)
-
+    # await broadcast_message("Hi there this is working")
+    # codeChange = [
+    #     {
+    #         "filename": "database.py",
+    #         "oldCode": oldCode,
+    #         "newCode": newCode
+    #
+    #     },
+    #     {
+    #         "oldCode": oldCode1,
+    #         "newCode": newCode1,
+    #         "filename": "main.py"
+    #     }
+    #
+    # ]
+    # await broadcast_message(type="code_viewer",codeChange=codeChange)
+    # result = "hi"
+    """
+import asyncio
+import json
+import os
+import requests    
+    """
+    return result
